@@ -85,6 +85,7 @@ import com.zcshou.database.DataBaseHistorySearch;
 import com.zcshou.utils.ShareUtils;
 import com.zcshou.utils.GoUtils;
 import com.zcshou.utils.MapUtils;
+import com.zcshou.utils.TencentWebKey;
 
 import com.elvishew.xlog.XLog;
 
@@ -828,10 +829,11 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         //参数坐标系：GCJ02
         double[] latLng = MapUtils.gcj02towgs84(lng, lat);
 
-        String tencentKey = sharedPreferences.getString("setting_tencent_key", "");
-        if (tencentKey == null || tencentKey.isEmpty()) {
-            tencentKey = BuildConfig.TENCENT_MAP_KEY;  // 由 local.properties 注入(gitignored),用户可在设置覆盖
-        }
+        final TencentWebKey webKey = TencentWebKey.load(this);
+        String tencentKey = webKey.value;
+        final String requestedName = mMarkName != null ? mMarkName
+                : getResources().getString(R.string.history_location_default_name);
+        XLog.i("Tencent geocoder request: " + webKey.diagnostic);
         // 腾讯逆地理编码,输入为 GCJ02
         String mapApiUrl = "https://apis.map.qq.com/ws/geocoder/v1/?location=" + lat + "," + lng
                 + "&key=" + tencentKey + "&get_poi=0";
@@ -842,21 +844,24 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             @Override
             public void onFailure(@NonNull Call call, @NonNull IOException e) {
                 XLog.e("HTTP: HTTP GET FAILED");
-                saveLocationToHistory(mMarkName, latLng[0], latLng[1], lng, lat);
+                saveLocationToHistory(requestedName, latLng[0], latLng[1], lng, lat);
             }
 
             @Override
             public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
                 ResponseBody responseBody = response.body();
                 if (responseBody == null) {
-                    saveLocationToHistory(mMarkName, latLng[0], latLng[1], lng, lat);
+                    saveLocationToHistory(requestedName, latLng[0], latLng[1], lng, lat);
                     return;
                 }
                 String resp = responseBody.string();
                 try {
                     JSONObject getRetJson = new JSONObject(resp);
-                    String name = mMarkName;
-                    if (getRetJson.getInt("status") == 0) {
+                    String name = requestedName;
+                    int status = getRetJson.getInt("status");
+                    XLog.i("Tencent geocoder response: http=" + response.code()
+                            + " status=" + status + " " + webKey.diagnostic);
+                    if (status == 0) {
                         JSONObject result = getRetJson.getJSONObject("result");
                         String address = result.optString("address", "");
                         if (result.has("formatted_addresses")) {
@@ -868,13 +873,15 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                         if (!address.isEmpty()) {
                             name = address;
                         }
-                    } else if (name == null) {
-                        name = getRetJson.optString("message", getResources().getString(R.string.history_location_default_name));
+                    } else {
+                        XLog.e("Tencent geocoder failed: status=" + status
+                                + " message=" + getRetJson.optString("message", "")
+                                + " " + webKey.diagnostic);
                     }
                     saveLocationToHistory(name, latLng[0], latLng[1], lng, lat);
                 } catch (JSONException e) {
                     XLog.e("JSON: resolve json error");
-                    String name = mMarkName != null ? mMarkName : getResources().getString(R.string.history_location_default_name);
+                    String name = requestedName;
                     saveLocationToHistory(name, latLng[0], latLng[1], lng, lat);
                 }
             }
@@ -895,10 +902,9 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     // 腾讯地图地点搜索 (GCJ02 坐标)
     // 使用 place/v1/search 而非 suggestion: 配额独立计算,suggestion 端点容易因为示例 key 被刷爆
     private void queryTencentSuggestion(String keyword) {
-        String tencentKey = sharedPreferences.getString("setting_tencent_key", "");
-        if (tencentKey == null || tencentKey.isEmpty()) {
-            tencentKey = BuildConfig.TENCENT_MAP_KEY;  // 由 local.properties 注入(gitignored),用户可在设置覆盖
-        }
+        final TencentWebKey webKey = TencentWebKey.load(this);
+        String tencentKey = webKey.value;
+        XLog.i("Tencent place/search request: " + webKey.diagnostic);
         String encodedKeyword;
         try {
             encodedKeyword = URLEncoder.encode(keyword, "UTF-8");
@@ -935,8 +941,10 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                 try {
                     JSONObject json = new JSONObject(resp);
                     int status = json.getInt("status");
+                    XLog.i("Tencent place/search response: http=" + response.code()
+                            + " status=" + status + " " + webKey.diagnostic);
                     if (status != 0) {
-                        XLog.e("Tencent place/search failed: status=" + status + " message=" + json.optString("message", ""));
+                        XLog.e("Tencent place/search failed: status=" + status + " message=" + json.optString("message", "") + " " + webKey.diagnostic);
                         runOnUiThread(() -> GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.app_search_null)));
                         return;
                     }

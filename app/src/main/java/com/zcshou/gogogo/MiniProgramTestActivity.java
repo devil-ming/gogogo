@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat;
 
 import com.elvishew.xlog.XLog;
 import com.zcshou.utils.MapUtils;
+import com.zcshou.utils.TencentWebKey;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -37,7 +38,6 @@ public class MiniProgramTestActivity extends BaseActivity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     // Key 由 local.properties 在 build 时注入(gitignored),拷贝项目后请在 local.properties 配置自己申请的 Key
     private static final String DEFAULT_BAIDU_AK = BuildConfig.MAPS_API_KEY;
-    private static final String DEFAULT_TENCENT_KEY = BuildConfig.TENCENT_MAP_KEY;
 
     private TextView tvStatus;
     private TextView tvWgs84;
@@ -220,8 +220,10 @@ public class MiniProgramTestActivity extends BaseActivity {
     }
 
     private void queryTencentAddress(double gcjLat, double gcjLng) {
+        final TencentWebKey webKey = TencentWebKey.load(this);
+        XLog.i("Tencent test/geocoder request: " + webKey.diagnostic);
         String url = "https://apis.map.qq.com/ws/geocoder/v1/?location=" + gcjLat + "," + gcjLng
-                + "&key=" + DEFAULT_TENCENT_KEY + "&get_poi=0";
+                + "&key=" + webKey.value + "&get_poi=0";
 
         Request request = new Request.Builder().url(url).get().build();
         mOkHttpClient.newCall(request).enqueue(new Callback() {
@@ -237,6 +239,8 @@ public class MiniProgramTestActivity extends BaseActivity {
                     try {
                         JSONObject json = new JSONObject(body.string());
                         int status = json.getInt("status");
+                        XLog.i("Tencent test/geocoder response: http=" + response.code()
+                                + " status=" + status + " " + webKey.diagnostic);
                         if (status == 0) {
                             JSONObject result = json.getJSONObject("result");
                             String address = result.getString("address");
@@ -247,7 +251,10 @@ public class MiniProgramTestActivity extends BaseActivity {
                             runOnUiThread(() -> tvAddressTencent.setText("腾讯: " + display));
                         } else {
                             String msg = json.optString("message", "未知错误");
-                            runOnUiThread(() -> tvAddressTencent.setText("腾讯: " + msg));
+                            XLog.e("Tencent test/geocoder failed: status=" + status
+                                    + " message=" + msg + " " + webKey.diagnostic);
+                            runOnUiThread(() -> tvAddressTencent.setText(
+                                    "腾讯: " + msg + " (status=" + status + ")\n" + webKey.diagnostic));
                         }
                     } catch (JSONException e) {
                         runOnUiThread(() -> tvAddressTencent.setText("腾讯: 解析失败"));
