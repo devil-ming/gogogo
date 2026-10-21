@@ -147,4 +147,9 @@
     <string name="update_ignore">忽略一次</string>
     <string name="update_time">更新时间：</string>
     <string name="update_commit">提交信息：</string>
+    <string name="mock_position_title">当前模拟位置</string>
+    <string name="mock_marker_label">模拟</string>
+    <string name="mock_position_active">正在模拟 · 点击回到此处\n纬度 %1$.6f，经度 %2$.6f（GCJ02）</string>
+    <string name="mock_position_waiting">模拟位置待更新 · 点击回到此处\n纬度 %1$.6f，经度 %2$.6f（GCJ02）</string>
+    <string name="mock_connecting">正在连接定位服务，请稍后重试</string>
 </resources>

@@ -45,8 +45,8 @@ jobs:
           printf 'TENCENT_MAP_KEY=%s\n' "$TENCENT_MAP_KEY" >> local.properties
           printf 'MAPS_API_KEY=UNUSED\n' >> local.properties
 
-      - name: Build debug APK
-        run: bash ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Build and test debug APK
+        run: bash ./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

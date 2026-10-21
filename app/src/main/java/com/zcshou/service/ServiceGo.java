@@ -36,6 +36,10 @@ import com.zcshou.gogogo.MainActivity;
 import com.zcshou.gogogo.R;
 import com.zcshou.joystick.JoyStick;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class ServiceGo extends Service {
     // 定位相关变量
     public static final double DEFAULT_LAT = 36.667662;
@@ -56,8 +60,37 @@ public class ServiceGo extends Service {
     private Handler mLocHandler;
     private LocationListener mPersistentListener;     // 保持 Provider 活跃订阅,见 onCreate 注释
     private FusedLocationProviderClient mFusedClient; // Google Play Services fused mock, null = GMS 不可用
-    private boolean mFusedMockEnabled = false;
-    private boolean isStop = false;
+    private volatile boolean mFusedMockEnabled = false;
+    private volatile boolean isStop = false;
+    private boolean mHasPosition = false;
+    private boolean mLoopStarted = false;
+    private final Object mPositionLock = new Object();
+    private static volatile MockPosition sCurrentPosition;
+    private final AtomicBoolean mFusedWritePending = new AtomicBoolean();
+    private final Map<String, Long> mLastErrorLog = new HashMap<>();
+    private volatile long mLastGmsSuccessMs;
+    private volatile long mLastSystemSuccessMs;
+    private long mLastHeartbeatMs;
+
+    public static MockPosition getCurrentPosition() {
+        return sCurrentPosition;
+    }
+
+    private MockPosition snapshot(long tick) {
+        return new MockPosition(mCurLng, mCurLat, mCurAlt, mCurBea, (float) mSpeed,
+                tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+    }
+
+    private void logProviderFailure(String provider, Exception error) {
+        synchronized (mLastErrorLog) {
+            long now = SystemClock.elapsedRealtime();
+            Long last = mLastErrorLog.get(provider);
+            if (last == null || now - last >= 10000) {
+                mLastErrorLog.put(provider, now);
+                XLog.e("SERVICEGO: " + provider + " failed: " + error.toString());
+            }
+        }
+    }
     // 通知栏消息
     private static final int SERVICE_GO_NOTE_ID = 1;
     private static final String SERVICE_GO_NOTE_ACTION_JOYSTICK_SHOW = "ShowJoyStick";
@@ -80,6 +113,7 @@ public class ServiceGo extends Service {
         super.onCreate();
 
         mLocManager = (LocationManager) this.getSystemService(Context.LOCATION_SERVICE);
+        initNotification();
 
         removeTestProviderNetwork();
         addTestProviderNetwork();
@@ -95,8 +129,6 @@ public class ServiceGo extends Service {
         }
 
         initGoLocation();
-
-        initNotification();
 
         initJoyStick();
 
@@ -118,6 +150,10 @@ public class ServiceGo extends Service {
             mFusedClient = LocationServices.getFusedLocationProviderClient(this);
             mFusedClient.setMockMode(true)
                     .addOnSuccessListener(unused -> {
+                        if (isStop) {
+                            mFusedClient.setMockMode(false);
+                            return;
+                        }
                         mFusedMockEnabled = true;
                         XLog.i("SERVICEGO: FusedLocation setMockMode(true) OK");
                     })
@@ -149,18 +185,46 @@ public class ServiceGo extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        mCurLng = intent.getDoubleExtra(MainActivity.LNG_MSG_ID, DEFAULT_LNG);
-        mCurLat = intent.getDoubleExtra(MainActivity.LAT_MSG_ID, DEFAULT_LAT);
-        mCurAlt = intent.getDoubleExtra(MainActivity.ALT_MSG_ID, DEFAULT_ALT);
-
-        mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
-
-        return super.onStartCommand(intent, flags, startId);
+        if (intent == null || !intent.hasExtra(MainActivity.LNG_MSG_ID)
+                || !intent.hasExtra(MainActivity.LAT_MSG_ID)) {
+            XLog.e("SERVICEGO: missing target coordinates; stopping");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        double lng = intent.getDoubleExtra(MainActivity.LNG_MSG_ID, Double.NaN);
+        double lat = intent.getDoubleExtra(MainActivity.LAT_MSG_ID, Double.NaN);
+        double alt = intent.getDoubleExtra(MainActivity.ALT_MSG_ID, DEFAULT_ALT);
+        if (!Double.isFinite(lng) || !Double.isFinite(lat) || !Double.isFinite(alt)
+                || Math.abs(lng) > 180 || Math.abs(lat) > 90) {
+            XLog.e("SERVICEGO: invalid target coordinates; stopping");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        synchronized (mPositionLock) {
+            mCurLng = lng;
+            mCurLat = lat;
+            mCurAlt = alt;
+            mHasPosition = true;
+            sCurrentPosition = snapshot(0);
+        }
+        mJoyStick.setCurrentPosition(lng, lat, alt);
+        // Do not publish the built-in default coordinates before receiving the Intent.
+        if (!mLoopStarted) {
+            mLoopStarted = true;
+            mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
+        }
+        XLog.i("SERVICEGO: target received; location loop active");
+        return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        isStop = true;
+        synchronized (mPositionLock) {
+            isStop = true;
+            mHasPosition = false;
+            sCurrentPosition = null;
+        }
+        XLog.i("SERVICEGO: onDestroy; mock location stopped");
         mLocHandler.removeMessages(HANDLER_MSG_ID);
         mLocHandlerThread.quit();
 
@@ -238,21 +302,21 @@ public class ServiceGo extends Service {
         mJoyStick.setListener(new JoyStick.JoyStickClickListener() {
             @Override
             public void onMoveInfo(double speed, double disLng, double disLat, double angle) {
-                mSpeed = speed;
-                // 根据当前的经纬度和距离，计算下一个经纬度
-                // Latitude: 1 deg = 110.574 km // 纬度的每度的距离大约为 110.574km
-                // Longitude: 1 deg = 111.320*cos(latitude) km  // 经度的每度的距离从0km到111km不等
-                // 具体见：http://wp.mlab.tw/?p=2200
-                mCurLng += disLng / (111.320 * Math.cos(Math.abs(mCurLat) * Math.PI / 180));
-                mCurLat += disLat / 110.574;
-                mCurBea = (float) angle;
+                synchronized (mPositionLock) {
+                    mSpeed = speed;
+                    mCurLng += disLng / (111.320 * Math.cos(Math.abs(mCurLat) * Math.PI / 180));
+                    mCurLat += disLat / 110.574;
+                    mCurBea = (float) angle;
+                }
             }
 
             @Override
             public void onPositionInfo(double lng, double lat, double alt) {
-                mCurLng = lng;
-                mCurLat = lat;
-                mCurAlt = alt;
+                synchronized (mPositionLock) {
+                    mCurLng = lng;
+                    mCurLat = lat;
+                    mCurAlt = alt;
+                }
             }
         });
         mJoyStick.show();
@@ -268,27 +332,34 @@ public class ServiceGo extends Service {
             // 这里的Handler对象可以看作是绑定在HandlerThread子线程中，所以handlerMessage里的操作是在子线程中运行的
             @Override
             public void handleMessage(@NonNull Message msg) {
-                try {
-                    Thread.sleep(TICK_INTERVAL_MS);
-
-                    if (!isStop) {
-                        setLocationNetwork();
-                        setLocationGPS();
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            setLocationFused();
-                        }
-                        setLocationFusedClient();
-
-                        sendEmptyMessage(HANDLER_MSG_ID);
-                    }
-                } catch (InterruptedException e) {
-                    XLog.e("SERVICEGO: ERROR - handleMessage");
-                    Thread.currentThread().interrupt();
+                MockPosition position;
+                synchronized (mPositionLock) {
+                    if (isStop || !mHasPosition) return;
+                    position = snapshot(SystemClock.elapsedRealtime());
                 }
+                setLocationNetwork(position);
+                setLocationGPS(position);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setLocationFused(position);
+                }
+                setLocationFusedClient(position);
+                synchronized (mPositionLock) {
+                    if (isStop) return;
+                    // Preserve a target change made while the previous write was in flight.
+                    sCurrentPosition = snapshot(SystemClock.elapsedRealtime());
+                }
+                long now = SystemClock.elapsedRealtime();
+                if (now - mLastHeartbeatMs >= 10000) {
+                    mLastHeartbeatMs = now;
+                    XLog.i("SERVICEGO: heartbeat systemAgeMs="
+                            + (mLastSystemSuccessMs == 0 ? -1 : now - mLastSystemSuccessMs)
+                            + " gmsAgeMs="
+                            + (mLastGmsSuccessMs == 0 ? -1 : now - mLastGmsSuccessMs));
+                }
+                sendEmptyMessageDelayed(HANDLER_MSG_ID, TICK_INTERVAL_MS);
             }
         };
-
-        mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
+        // onStartCommand starts the loop only after coordinates have been validated.
     }
 
     private void removeTestProviderGPS() {
@@ -322,25 +393,26 @@ public class ServiceGo extends Service {
         }
     }
 
-    private void setLocationGPS() {
+    private void setLocationGPS(MockPosition position) {
         try {
             // 尽可能模拟真实的 GPS 数据
             Location loc = new Location(LocationManager.GPS_PROVIDER);
             loc.setAccuracy(Criteria.ACCURACY_FINE);    // 设定此位置的估计水平精度，以米为单位。
-            loc.setAltitude(mCurAlt);                     // 设置高度，在 WGS 84 参考坐标系中的米
-            loc.setBearing(mCurBea);                       // 方向（度）
-            loc.setLatitude(mCurLat);                   // 纬度（度）
-            loc.setLongitude(mCurLng);                  // 经度（度）
+            loc.setAltitude(position.altitude);                     // 设置高度，在 WGS 84 参考坐标系中的米
+            loc.setBearing(position.bearing);                       // 方向（度）
+            loc.setLatitude(position.latitude);                   // 纬度（度）
+            loc.setLongitude(position.longitude);                  // 经度（度）
             loc.setTime(System.currentTimeMillis());    // 本地时间
-            loc.setSpeed((float) mSpeed);
+            loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
             Bundle bundle = new Bundle();
             bundle.putInt("satellites", 7);
             loc.setExtras(bundle);
 
             mLocManager.setTestProviderLocation(LocationManager.GPS_PROVIDER, loc);
+            mLastSystemSuccessMs = SystemClock.elapsedRealtime();
         } catch (Exception e) {
-            XLog.e("SERVICEGO: ERROR - setLocationGPS");
+            logProviderFailure("gps/write", e);
         }
     }
 
@@ -377,22 +449,23 @@ public class ServiceGo extends Service {
         }
     }
 
-    private void setLocationNetwork() {
+    private void setLocationNetwork(MockPosition position) {
         try {
             // 尽可能模拟真实的 NETWORK 数据
             Location loc = new Location(LocationManager.NETWORK_PROVIDER);
             loc.setAccuracy(Criteria.ACCURACY_COARSE);  // 设定此位置的估计水平精度，以米为单位。
-            loc.setAltitude(mCurAlt);                     // 设置高度，在 WGS 84 参考坐标系中的米
-            loc.setBearing(mCurBea);                       // 方向（度）
-            loc.setLatitude(mCurLat);                   // 纬度（度）
-            loc.setLongitude(mCurLng);                  // 经度（度）
+            loc.setAltitude(position.altitude);                     // 设置高度，在 WGS 84 参考坐标系中的米
+            loc.setBearing(position.bearing);                       // 方向（度）
+            loc.setLatitude(position.latitude);                   // 纬度（度）
+            loc.setLongitude(position.longitude);                  // 经度（度）
             loc.setTime(System.currentTimeMillis());    // 本地时间
-            loc.setSpeed((float) mSpeed);
+            loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
 
             mLocManager.setTestProviderLocation(LocationManager.NETWORK_PROVIDER, loc);
+            mLastSystemSuccessMs = SystemClock.elapsedRealtime();
         } catch (Exception e) {
-            XLog.e("SERVICEGO: ERROR - setLocationNetwork");
+            logProviderFailure("network/write", e);
         }
     }
 
@@ -421,40 +494,46 @@ public class ServiceGo extends Service {
         }
     }
 
-    private void setLocationFused() {
+    private void setLocationFused(MockPosition position) {
         try {
             Location loc = new Location(LocationManager.FUSED_PROVIDER);
             loc.setAccuracy(Criteria.ACCURACY_FINE);
-            loc.setAltitude(mCurAlt);
-            loc.setBearing(mCurBea);
-            loc.setLatitude(mCurLat);
-            loc.setLongitude(mCurLng);
+            loc.setAltitude(position.altitude);
+            loc.setBearing(position.bearing);
+            loc.setLatitude(position.latitude);
+            loc.setLongitude(position.longitude);
             loc.setTime(System.currentTimeMillis());
-            loc.setSpeed((float) mSpeed);
+            loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
 
             mLocManager.setTestProviderLocation(LocationManager.FUSED_PROVIDER, loc);
+            mLastSystemSuccessMs = SystemClock.elapsedRealtime();
         } catch (Exception e) {
-            // fused test provider 没注上时这里会 fail,正常
+            logProviderFailure("fused/write", e);
         }
     }
 
     @SuppressLint("MissingPermission")
-    private void setLocationFusedClient() {
-        if (mFusedClient == null || !mFusedMockEnabled) return;
+    private void setLocationFusedClient(MockPosition position) {
+        if (mFusedClient == null || !mFusedMockEnabled || isStop
+                || !mFusedWritePending.compareAndSet(false, true)) return;
         try {
             Location loc = new Location("fused");
             loc.setAccuracy(Criteria.ACCURACY_FINE);
-            loc.setAltitude(mCurAlt);
-            loc.setBearing(mCurBea);
-            loc.setLatitude(mCurLat);
-            loc.setLongitude(mCurLng);
+            loc.setAltitude(position.altitude);
+            loc.setBearing(position.bearing);
+            loc.setLatitude(position.latitude);
+            loc.setLongitude(position.longitude);
             loc.setTime(System.currentTimeMillis());
-            loc.setSpeed((float) mSpeed);
+            loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
-            mFusedClient.setMockLocation(loc);
-        } catch (Throwable t) {
-            // 不打日志,避免每 33ms 刷屏
+            mFusedClient.setMockLocation(loc)
+                    .addOnSuccessListener(unused -> mLastGmsSuccessMs = SystemClock.elapsedRealtime())
+                    .addOnFailureListener(e -> logProviderFailure("gms/write", e))
+                    .addOnCompleteListener(task -> mFusedWritePending.set(false));
+        } catch (Exception e) {
+            mFusedWritePending.set(false);
+            logProviderFailure("gms/write", e);
         }
     }
 
@@ -476,11 +555,12 @@ public class ServiceGo extends Service {
 
     public class ServiceGoBinder extends Binder {
         public void setPosition(double lng, double lat, double alt) {
-            mLocHandler.removeMessages(HANDLER_MSG_ID);
-            mCurLng = lng;
-            mCurLat = lat;
-            mCurAlt = alt;
-            mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
+            synchronized (mPositionLock) {
+                mCurLng = lng;
+                mCurLat = lat;
+                mCurAlt = alt;
+                sCurrentPosition = snapshot(0);
+            }
             mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
         }
     }

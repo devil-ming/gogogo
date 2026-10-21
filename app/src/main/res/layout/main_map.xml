@@ -19,6 +19,23 @@
             android:clickable="true"
             android:focusable="true" />
 
+        <TextView
+            android:id="@+id/mock_position_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentTop="true"
+            android:layout_marginStart="12dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="108dp"
+            android:background="@color/white"
+            android:padding="12dp"
+            android:minHeight="48dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:textColor="@color/colorPrimary"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
         <RadioGroup
             android:id="@+id/RadioGroupMapType"
             android:layout_width="90dp"

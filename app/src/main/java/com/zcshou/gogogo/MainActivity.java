@@ -13,6 +13,12 @@ import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.database.sqlite.SQLiteDatabase;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -62,6 +68,7 @@ import com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory;
 import com.tencent.tencentmap.mapsdk.maps.model.CameraPosition;
 import com.tencent.tencentmap.mapsdk.maps.MapView;
 import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions;
+import com.tencent.tencentmap.mapsdk.maps.model.Marker;
 import com.tencent.tencentmap.mapsdk.maps.model.LatLng;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.navigation.NavigationView;
@@ -80,6 +87,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.zcshou.service.ServiceGo;
+import com.zcshou.service.MockPosition;
 import com.zcshou.database.DataBaseHistoryLocation;
 import com.zcshou.database.DataBaseHistorySearch;
 import com.zcshou.utils.ShareUtils;
@@ -116,7 +124,20 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     public static String mCurrentCity = null;
     private MapView mMapView;
     private static TencentMap mTencentMap = null;
-    private static LatLng mMarkLatLngMap = new LatLng(36.547743718042415, 117.07018449827267); // 当前标记的地图点
+    private static LatLng mMarkLatLngMap; // Pending selection, independent of the running simulation.
+    private static Marker mSelectionMarker;
+    private Marker mMockMarker;
+    private BitmapDescriptor mMockIcon;
+    private TextView mMockStatus;
+    private boolean mBound;
+    private boolean mCenterOnMock = true;
+    private final Handler mUiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mRefreshMock = new Runnable() {
+        @Override public void run() {
+            refreshMockPosition();
+            mUiHandler.postDelayed(this, 500);
+        }
+    };
     private static String mMarkName = null;
     private SensorManager mSensorManager;
     private Sensor mSensorAccelerometer;
@@ -185,11 +206,13 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             @Override
             public void onServiceConnected(ComponentName name, IBinder service) {
                 mServiceBinder = (ServiceGo.ServiceGoBinder)service;
+                refreshMockPosition();
             }
 
             @Override
             public void onServiceDisconnected(ComponentName name) {
-
+                mServiceBinder = null;
+                isMockServStart = false;
             }
         };
 
@@ -200,6 +223,14 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         initUpdateVersion();
 
         checkUpdateVersion(false);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // A history/search selection should stay visible when returning to the map.
+        mCenterOnMock = mMarkLatLngMap == null || mSelectionMarker == null;
+        mUiHandler.post(mRefreshMock);
     }
 
     @Override
@@ -222,6 +253,7 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     @Override
     protected void onStop() {
         XLog.i("MainActivity: onStop");
+        mUiHandler.removeCallbacks(mRefreshMock);
         //取消注册传感器监听
         mSensorManager.unregisterListener(this);
         super.onStop();
@@ -231,11 +263,19 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     protected void onDestroy() {
         XLog.i("MainActivity: onDestroy");
 
-        if (isMockServStart) {
-            unbindService(mConnection); // 解绑服务，服务要记得解绑，不要造成内存泄漏
-            Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
-            stopService(serviceGoIntent);
+        mUiHandler.removeCallbacks(mRefreshMock);
+        if (mBound) {
+            unbindService(mConnection);
+            mBound = false;
         }
+        mServiceBinder = null;
+        // The foreground service belongs to the user's simulation, not this Activity.
+        if (mLocationManager != null && mLocationListener != null) {
+            mLocationManager.removeUpdates(mLocationListener);
+        }
+        clearSelectionMarker();
+        if (mMockMarker != null) mMockMarker.remove();
+        mMockMarker = null;
         unregisterReceiver(mDownloadBdRcv);
 
         mSensorManager.unregisterListener(this);
@@ -443,6 +483,9 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         mMapView = findViewById(R.id.txMapView);
         // showZoomControls not available in Tencent SDK 5.8.3
         mTencentMap = mMapView.getMap();
+        mSelectionMarker = null;
+        mMockStatus = findViewById(R.id.mock_position_status);
+        mMockStatus.setOnClickListener(v -> centerOnMockPosition());
         mTencentMap.setMapType(TencentMap.MAP_TYPE_NORMAL);
         mTencentMap.setMyLocationEnabled(true);
         mTencentMap.setOnMapClickListener(new TencentMap.OnMapClickListener() {
@@ -534,7 +577,7 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                     mCurrentLat = gcj[1];
                     mCurrentLon = gcj[0];
 
-                    if (isFirstLoc) {
+                    if (isFirstLoc && ServiceGo.getCurrentPosition() == null) {
                         isFirstLoc = false;
                         mMarkLatLngMap = new LatLng(gcj[1], gcj[0]);
                         CameraPosition cameraPosition = new CameraPosition.Builder()
@@ -650,19 +693,99 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         });
     }
 
+    private static void clearSelectionMarker() {
+        if (mSelectionMarker != null) mSelectionMarker.remove();
+        mSelectionMarker = null;
+    }
+
+    private void refreshMockPosition() {
+        MockPosition position = ServiceGo.getCurrentPosition();
+        if (position == null) {
+            isMockServStart = false;
+            if (mMockMarker != null) {
+                mMockMarker.remove();
+                mTencentMap.setMyLocationEnabled(true);
+            }
+            mMockMarker = null;
+            mMockStatus.setVisibility(View.GONE);
+            mButtonStart.setImageResource(R.drawable.ic_position);
+            return;
+        }
+        if (!mBound) {
+            // Flag 0 reconnects to an existing service without creating a new one.
+            mBound = bindService(new Intent(this, ServiceGo.class), mConnection, 0);
+        }
+        isMockServStart = true;
+        mButtonStart.setImageResource(R.drawable.ic_fly);
+        double[] gcj = MapUtils.wgs2gcj02(position.longitude, position.latitude);
+        LatLng target = new LatLng(gcj[1], gcj[0]);
+        if (mMockMarker == null) {
+            // The SDK's independent blue dot can disagree with the service target.
+            mTencentMap.setMyLocationEnabled(false);
+            mMockMarker = mTencentMap.addMarker(new MarkerOptions().position(target)
+                    .icon(getMockIcon()).anchor(0.5f, 0.5f)
+                    .title(getString(R.string.mock_position_title)));
+        } else {
+            mMockMarker.setPosition(target);
+        }
+        long now = SystemClock.elapsedRealtime();
+        boolean fresh = position.isFreshAt(now);
+        mMockStatus.setText(getString(fresh ? R.string.mock_position_active : R.string.mock_position_waiting,
+                target.latitude, target.longitude));
+        mMockStatus.setVisibility(View.VISIBLE);
+        if (mCenterOnMock) {
+            mCenterOnMock = false;
+            isFirstLoc = false;
+            mTencentMap.moveCamera(CameraUpdateFactory.newCameraPosition(
+                    new CameraPosition.Builder().target(target).zoom(17.0f).build()));
+        }
+    }
+
+    private void centerOnMockPosition() {
+        if (ServiceGo.getCurrentPosition() == null) return;
+        mCenterOnMock = true;
+        refreshMockPosition();
+    }
+
+    private BitmapDescriptor getMockIcon() {
+        if (mMockIcon == null) {
+            float density = getResources().getDisplayMetrics().density;
+            int size = Math.round(44 * density);
+            Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bitmap);
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            float center = size / 2f;
+            paint.setColor(getColor(R.color.white));
+            canvas.drawCircle(center, center, 21 * density, paint);
+            paint.setColor(getColor(R.color.colorAccent));
+            canvas.drawCircle(center, center, 19 * density, paint);
+            paint.setColor(getColor(R.color.white));
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(12 * density);
+            paint.setFakeBoldText(true);
+            canvas.drawText(getString(R.string.mock_marker_label), center,
+                    center - (paint.ascent() + paint.descent()) / 2, paint);
+            mMockIcon = BitmapDescriptorFactory.fromBitmap(bitmap);
+        }
+        return mMockIcon;
+    }
+
     //标定选择的位置
     private void markMap() {
         if (mMarkLatLngMap != null) {
             MarkerOptions ooA = new MarkerOptions().position(mMarkLatLngMap).icon(mMapIndicator);
-            mTencentMap.clear();
-            mTencentMap.addMarker(ooA);
+            clearSelectionMarker();
+            mSelectionMarker = mTencentMap.addMarker(ooA);
         }
     }
 
     private void resetMap() {
-        mTencentMap.clear();
+        clearSelectionMarker();
         mMarkLatLngMap = null;
-
+        if (ServiceGo.getCurrentPosition() != null) {
+            centerOnMockPosition();
+            return;
+        }
 
         CameraPosition.Builder builder = new CameraPosition.Builder();
         builder.target(new LatLng(mCurrentLat, mCurrentLon)).zoom(18.0f);
@@ -678,8 +801,8 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                 mMarkName = name;
                 mMarkLatLngMap = new LatLng(Double.parseDouble(gcj02Latitude), Double.parseDouble(gcj02Longitude));
                 MarkerOptions ooA = new MarkerOptions().position(mMarkLatLngMap).icon(mMapIndicator);
-                mTencentMap.clear();
-                mTencentMap.addMarker(ooA);
+                clearSelectionMarker();
+                mSelectionMarker = mTencentMap.addMarker(ooA);
                 CameraUpdate mapstatusupdate = CameraUpdateFactory.newLatLng(mMarkLatLngMap);
                 mTencentMap.moveCamera(mapstatusupdate);
             }
@@ -698,7 +821,6 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
 
     private void startGoLocation() {
         Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
-        bindService(serviceGoIntent, mConnection, BIND_AUTO_CREATE);    // 绑定服务和活动，之后活动就可以去调服务的方法了
         double[] latLng = MapUtils.gcj02towgs84(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
         serviceGoIntent.putExtra(LNG_MSG_ID, latLng[0]);
         serviceGoIntent.putExtra(LAT_MSG_ID, latLng[1]);
@@ -706,16 +828,26 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         serviceGoIntent.putExtra(ALT_MSG_ID, alt);
 
         startForegroundService(serviceGoIntent);
+        if (!mBound) mBound = bindService(serviceGoIntent, mConnection, BIND_AUTO_CREATE);
+        mCenterOnMock = true;
         XLog.d("startForegroundService: ServiceGo");
 
         isMockServStart = true;
     }
 
     private void stopGoLocation() {
-        unbindService(mConnection); // 解绑服务，服务要记得解绑，不要造成内存泄漏
+        if (mBound) {
+            unbindService(mConnection);
+            mBound = false;
+        }
+        mServiceBinder = null;
         Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
         stopService(serviceGoIntent);
         isMockServStart = false;
+        if (mMockMarker != null) mMockMarker.remove();
+        mMockMarker = null;
+        mMockStatus.setVisibility(View.GONE);
+        mTencentMap.setMyLocationEnabled(true);
     }
 
     private void doGoLocation(View v) {
@@ -744,13 +876,18 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             } else {
                 double[] latLng = MapUtils.gcj02towgs84(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
                 double alt = Double.parseDouble(sharedPreferences.getString("setting_altitude", "55.0"));
+                if (mServiceBinder == null) {
+                    GoUtils.DisplayToast(this, getString(R.string.mock_connecting));
+                    return;
+                }
                 mServiceBinder.setPosition(latLng[0], latLng[1], alt);
+                mCenterOnMock = true;
                 Snackbar.make(v, "已传送到新位置", Snackbar.LENGTH_LONG)
                         .setAction("Action", null).show();
 
                 recordCurrentLocation(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
 
-                mTencentMap.clear();
+                clearSelectionMarker();
                 mMarkLatLngMap = null;
 
                 if (GoUtils.isWifiEnabled(MainActivity.this)) {
@@ -772,7 +909,7 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                             .setAction("Action", null).show();
 
                     recordCurrentLocation(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
-                    mTencentMap.clear();
+                    clearSelectionMarker();
                     mMarkLatLngMap = null;
 
                     if (GoUtils.isWifiEnabled(MainActivity.this)) {
