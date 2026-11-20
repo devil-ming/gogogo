@@ -12,6 +12,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.location.Criteria;
+import android.location.GnssStatus;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -65,6 +66,13 @@ public class ServiceGo extends Service {
     // 融合定位可能因此给该来源降权。改为真实量级, 并保持 GPS 优于 NETWORK。
     private static final float ACCURACY_GPS_M = 8.0f;
     private static final float ACCURACY_NETWORK_M = 35.0f;
+    // 真实 GPS fix 会同时给出垂直/速度/方向精度。缺失这些字段时, 融合定位可能
+    // 判定该位置质量不足而降低权重。卫星数取室外常见值, 而非固定 7。
+    private static final int SATELLITE_COUNT = 9;
+    // 与水平精度配套的垂直/速度/方向精度, 取值来自常见室外 GPS fix 的量级。
+    private static final float ACCURACY_VERTICAL_M = 12.0f;
+    private static final float ACCURACY_SPEED_MPS = 0.5f;
+    private static final float ACCURACY_BEARING_DEG = 10.0f;
     private LocationManager mLocManager;
     private HandlerThread mLocHandlerThread;
     private Handler mLocHandler;
@@ -148,6 +156,8 @@ public class ServiceGo extends Service {
         initJoyStick();
 
         logAvailableProviders();
+
+        logGnssStatus();
 
         // 关键:维持 Provider 活跃订阅。Android 12+ 上没有活跃 listener 的 Provider
         // 会进入低功耗/缓存退化状态,微信小程序调 getLastKnownLocation 拿不到
@@ -550,6 +560,36 @@ public class ServiceGo extends Service {
         }
     }
 
+    /**
+     * 记录 GNSS 卫星状态。系统实际可见卫星数为 0 时, 融合定位会判定 GPS 不可用,
+     * 转而采信基站/WiFi, 即使我们已经注入了 mock 位置。
+     */
+    @SuppressLint("MissingPermission")
+    private void logGnssStatus() {
+        try {
+            GnssStatus.Callback callback = new GnssStatus.Callback() {
+                @Override
+                public void onSatelliteStatusChanged(@NonNull GnssStatus status) {
+                    int used = 0;
+                    for (int i = 0; i < status.getSatelliteCount(); i++) {
+                        if (status.usedInFix(i)) used++;
+                    }
+                    XLog.i("SERVICEGO: gnss visible=" + status.getSatelliteCount() + " usedInFix=" + used);
+                }
+            };
+            boolean ok;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // 带 Handler 的重载自 API 30 起才存在
+                ok = mLocManager.registerGnssStatusCallback(callback, mLocHandler);
+            } else {
+                ok = mLocManager.registerGnssStatusCallback(callback);
+            }
+            XLog.i("SERVICEGO: gnss callback registered=" + ok);
+        } catch (Exception e) {
+            XLog.e("SERVICEGO: gnss status unavailable: " + e.getMessage());
+        }
+    }
+
     private void removeTestProviderGPS() {
         try {
             if (mLocManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
@@ -581,6 +621,19 @@ public class ServiceGo extends Service {
         }
     }
 
+    /**
+     * 补齐真实 GPS fix 会带的精度字段, 并写入 GNSS 状态 extras。
+     * 若这些字段缺失, 部分融合定位会判定该位置质量不足而降低权重,
+     * 转而采信基站/WiFi, 表现为"mock 生效但对方仍读到真实位置"。
+     */
+    private void applyGpsQuality(Location loc) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            loc.setVerticalAccuracyMeters(ACCURACY_VERTICAL_M);
+            loc.setSpeedAccuracyMetersPerSecond(ACCURACY_SPEED_MPS);
+            loc.setBearingAccuracyDegrees(ACCURACY_BEARING_DEG);
+        }
+    }
+
     private void setLocationGPS(MockPosition position) {
         try {
             // 尽可能模拟真实的 GPS 数据
@@ -593,9 +646,9 @@ public class ServiceGo extends Service {
             loc.setTime(System.currentTimeMillis());    // 本地时间
             loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+            applyGpsQuality(loc);
             Bundle bundle = new Bundle();
-            bundle.putInt("satellites", 7);
-            loc.setExtras(bundle);
+            bundle.putInt("satellites", SATELLITE_COUNT);            loc.setExtras(bundle);
 
             mLocManager.setTestProviderLocation(LocationManager.GPS_PROVIDER, loc);
             mLastSystemSuccessMs = SystemClock.elapsedRealtime();
@@ -649,6 +702,7 @@ public class ServiceGo extends Service {
             loc.setTime(System.currentTimeMillis());    // 本地时间
             loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+            applyGpsQuality(loc);
 
             mLocManager.setTestProviderLocation(LocationManager.NETWORK_PROVIDER, loc);
             mLastSystemSuccessMs = SystemClock.elapsedRealtime();
@@ -693,6 +747,7 @@ public class ServiceGo extends Service {
             loc.setTime(System.currentTimeMillis());
             loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+            applyGpsQuality(loc);
 
             mLocManager.setTestProviderLocation(LocationManager.FUSED_PROVIDER, loc);
             mLastSystemSuccessMs = SystemClock.elapsedRealtime();
@@ -715,6 +770,7 @@ public class ServiceGo extends Service {
             loc.setTime(System.currentTimeMillis());
             loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+            applyGpsQuality(loc);
             mFusedClient.setMockLocation(loc)
                     .addOnSuccessListener(unused -> mLastGmsSuccessMs = SystemClock.elapsedRealtime())
                     .addOnFailureListener(e -> logProviderFailure("gms/write", e))
