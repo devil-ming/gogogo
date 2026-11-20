@@ -53,6 +53,22 @@ SERVICEGO: heartbeat systemAgeMs=.. gmsAgeMs=.. readback[gps=.. net=.. fused=..]
 
 熄屏与亮屏会各输出一行 `screen off/on; loop=lastTickAgeMs=.. wakeLockHeld=..`，用于判断冻结是否跟随熄屏以及冻结发生的准确时刻。
 
+### GMS 写入闸门超时
+
+`setLocationFusedClient` 只允许一个 `setMockLocation` 请求在途，避免 GMS 过载。但原实现没有超时：一旦某次回调迟迟不返回，闸门会一直关闭，后续写入全部被静默丢弃。
+
+日志实测该情况会周期性出现，`gmsAgeMs` 从约 6 秒涨到 26 秒再回落（694 次心跳中有 25 次超过 5 秒），而同期 `systemAgeMs` 始终为 0，说明仅 GMS 通路中断、`LocationManager` 通路正常。
+
+中断期间，依赖 GMS fused 的读取方会退回 WiFi/基站并拿到真实位置，表现为"同一功能有时是模拟位置、有时是真实位置"。
+
+现在超过 `FUSED_WRITE_TIMEOUT_MS`（2 秒）仍无回调时，新写入会强制接管并输出：
+
+```
+SERVICEGO: gms/write timeout, taking over after <毫秒>ms
+```
+
+迟到的旧回调通过 `mFusedWriteStartMs` 比对，不会误清新请求的 pending 标志。
+
 ### 精度取值与运动学一致性
 
 注入的 `Location.setAccuracy()` 使用真实量级（GPS 8 米、网络 35 米）。此前传入的 `Criteria.ACCURACY_FINE`/`ACCURACY_COARSE` 是精度*等级*常量（值为 1/2），当作米数使用会让上报精度物理上不可信，融合定位可能因此降低该来源的权重。

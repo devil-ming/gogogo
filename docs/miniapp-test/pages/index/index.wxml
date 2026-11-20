@@ -22,6 +22,27 @@
     {{loading ? '定位中...' : '刷新定位'}}
   </button>
 
+  <!-- 持续定位测试 -->
+  <view class="card watch-card">
+    <view class="card-header">
+      <text class="card-title">持续定位 startLocationUpdate</text>
+      <text class="card-subtitle">带地图蓝点的小程序走这条路径，与刷新按钮不同</text>
+    </view>
+    <view class="card-body">
+      <view class="coord-row">
+        <text class="coord-label">状态</text>
+        <text class="coord-value">{{watchStatus}}</text>
+      </view>
+      <view class="coord-row">
+        <text class="coord-label">最新回调</text>
+        <text class="coord-value">{{watchInfo}}</text>
+      </view>
+    </view>
+    <view class="card-footer">
+      <button class="copy-btn" size="mini" bindtap="onStartWatch">开始 / 停止</button>
+    </view>
+  </view>
+
   <!-- WGS84 坐标卡片 -->
   <view class="card wgs84-card">
     <view class="card-header">

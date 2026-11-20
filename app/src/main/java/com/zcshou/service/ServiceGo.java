@@ -85,6 +85,9 @@ public class ServiceGo extends Service {
     private final Object mPositionLock = new Object();
     private static volatile MockPosition sCurrentPosition;
     private final AtomicBoolean mFusedWritePending = new AtomicBoolean();
+    // GMS 写入在途超时。超过该时长仍无回调, 视为卡死并允许新的写入接管。
+    private static final long FUSED_WRITE_TIMEOUT_MS = 2000;
+    private volatile long mFusedWriteStartMs;
     private final Map<String, Long> mLastErrorLog = new HashMap<>();
     private volatile long mLastGmsSuccessMs;
     private volatile long mLastSystemSuccessMs;
@@ -863,8 +866,21 @@ public class ServiceGo extends Service {
 
     @SuppressLint("MissingPermission")
     private void setLocationFusedClient(MockPosition position) {
-        if (mFusedClient == null || !mFusedMockEnabled || isStop
-                || !mFusedWritePending.compareAndSet(false, true)) return;
+        if (mFusedClient == null || !mFusedMockEnabled || isStop) return;
+
+        // 只允许一个请求在途, 但必须带超时: 若 GMS 的回调迟迟不返回, 这个闸门会一直
+        // 关闭, 后续所有写入被静默丢弃。日志中实测出现 10~26 秒的连续中断
+        // (gmsAgeMs 从 5998 涨到 26028 又回落), 期间读取方会退回真实位置。
+        if (mFusedWritePending.get()
+                && SystemClock.elapsedRealtime() - mFusedWriteStartMs < FUSED_WRITE_TIMEOUT_MS) {
+            return;
+        }
+        if (!mFusedWritePending.compareAndSet(false, true)) {
+            // 上一个请求疑似卡死, 强制接管
+            XLog.w("SERVICEGO: gms/write timeout, taking over after "
+                    + (SystemClock.elapsedRealtime() - mFusedWriteStartMs) + "ms");
+        }
+        mFusedWriteStartMs = SystemClock.elapsedRealtime();
         try {
             Location loc = new Location("fused");
             loc.setAccuracy(ACCURACY_GPS_M);
@@ -876,10 +892,19 @@ public class ServiceGo extends Service {
             loc.setSpeed(position.speed);
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
             applyGpsQuality(loc);
+            final long writeStartMs = mFusedWriteStartMs;
             mFusedClient.setMockLocation(loc)
                     .addOnSuccessListener(unused -> mLastGmsSuccessMs = SystemClock.elapsedRealtime())
                     .addOnFailureListener(e -> logProviderFailure("gms/write", e))
-                    .addOnCompleteListener(task -> mFusedWritePending.set(false));
+                    // 只有仍是本次写入时才释放闸门; 若已被超时接管, 迟到的回调
+                    // 不能把新请求的 pending 标志清掉。
+                    .addOnCompleteListener(task -> {
+                        // 只有仍是本次写入时才释放闸门; 若已被超时接管,
+                        // 迟到的回调不能把新请求的 pending 标志清掉。
+                        if (mFusedWriteStartMs == writeStartMs && mFusedWritePending.get()) {
+                            mFusedWritePending.set(false);
+                        }
+                    });
         } catch (Exception e) {
             mFusedWritePending.set(false);
             logProviderFailure("gms/write", e);

@@ -90,6 +90,10 @@ page {
   border-left: 6rpx solid #ff9800;
 }
 
+.watch-card {
+  border-left: 6rpx solid #9c27b0;
+}
+
 .card-header {
   padding: 24rpx 24rpx 12rpx;
 }

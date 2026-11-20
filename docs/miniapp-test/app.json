@@ -4,5 +4,16 @@
   ],
   "window": {
     "navigationBarTitleText": "定位测试"
-  }
+  },
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于读取当前定位坐标，对比影梭模拟位置是否生效"
+    }
+  },
+  "requiredPrivateInfos": [
+    "getLocation",
+    "chooseLocation",
+    "startLocationUpdate",
+    "onLocationChange"
+  ]
 }

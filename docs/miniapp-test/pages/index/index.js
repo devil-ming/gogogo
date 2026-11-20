@@ -5,7 +5,9 @@ Page({
     address: { name: '--', address: '--' },
     mockInfo: { isMock: false, message: '未获取定位' },
     lastUpdate: '--',
-    loading: false
+    loading: false,
+    watchStatus: '未启动',
+    watchInfo: '--'
   },
 
   onLoad() {
@@ -149,6 +151,35 @@ Page({
   // 刷新定位
   onRefresh() {
     this.getLocation();
+  },
+
+  /**
+   * 持续定位测试。带地图蓝点的小程序用的是 startLocationUpdate + onLocationChange,
+   * 这与 getLocation 是微信内部不同的代码路径, 需要单独验证是否同样吃系统 mock。
+   */
+  onStartWatch() {
+    const that = this;
+    if (this._watching) {
+      wx.stopLocationUpdate({ success() {} });
+      this._watching = false;
+      this.setData({ watchStatus: '已停止', watchInfo: '--' });
+      return;
+    }
+    wx.startLocationUpdate({
+      success() {
+        that._watching = true;
+        that.setData({ watchStatus: '监听中…' });
+        wx.onLocationChange(res => {
+          // 与单次 getLocation 的返回结构一致, 但来源是持续定位通道
+          const line = `${res.latitude.toFixed(8)}, ${res.longitude.toFixed(8)}  acc=${res.accuracy}`;
+          that.setData({ watchInfo: line });
+          console.log('=== onLocationChange ===', res.latitude, res.longitude, 'acc=', res.accuracy);
+        });
+      },
+      fail(err) {
+        that.setData({ watchStatus: '启动失败: ' + (err.errMsg || '未知') });
+      }
+    });
   },
 
   // 复制 WGS84 坐标
