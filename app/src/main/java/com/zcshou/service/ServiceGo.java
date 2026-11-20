@@ -147,6 +147,8 @@ public class ServiceGo extends Service {
 
         initJoyStick();
 
+        logAvailableProviders();
+
         // 关键:维持 Provider 活跃订阅。Android 12+ 上没有活跃 listener 的 Provider
         // 会进入低功耗/缓存退化状态,微信小程序调 getLastKnownLocation 拿不到
         // 刚 push 的 mock 数据 (高德/百度 App 自己有订阅就能看到)。
@@ -183,7 +185,17 @@ public class ServiceGo extends Service {
     @SuppressLint("MissingPermission")
     private void initPersistentLocationListener() {
         mPersistentListener = new LocationListener() {
-            @Override public void onLocationChanged(@NonNull Location location) {}
+            @Override public void onLocationChanged(@NonNull Location location) {
+                // 若某个 Provider 送来非 mock 位置, 说明我们的注入被其他来源覆盖了。
+                // 这是判断"系统里到底是谁的位置"最直接的证据, 按 Provider 限频记录。
+                if (!isMockLocation(location)) {
+                    logProviderFailure("nonMock/" + location.getProvider(),
+                            new IllegalStateException(String.format(Locale.US,
+                                    "lat=%.6f lng=%.6f acc=%.0f",
+                                    location.getLatitude(), location.getLongitude(),
+                                    location.getAccuracy())));
+                }
+            }
             @Override public void onProviderEnabled(@NonNull String provider) {}
             @Override public void onProviderDisabled(@NonNull String provider) {}
             @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
@@ -423,6 +435,7 @@ public class ServiceGo extends Service {
                             + (mLastSystemSuccessMs == 0 ? -1 : now - mLastSystemSuccessMs)
                             + " gmsAgeMs="
                             + (mLastGmsSuccessMs == 0 ? -1 : now - mLastGmsSuccessMs)
+                            + " " + describeTarget()
                             + " " + describeReadback()
                             + " " + describeEnvironment());
                 }
@@ -430,6 +443,22 @@ public class ServiceGo extends Service {
             }
         };
         // onStartCommand starts the loop only after coordinates have been validated.
+    }
+
+    /**
+     * 输出当前 mock 目标的绝对坐标。没有这行就无法把"微信读到的坐标"和"我们设置的目标"
+     * 做直接对比, 也就无法判断微信是走了缓存/基站, 还是真的无视了系统 mock。
+     */
+    private String describeTarget() {
+        double lng;
+        double lat;
+        double alt;
+        synchronized (mPositionLock) {
+            lng = mCurLng;
+            lat = mCurLat;
+            alt = mCurAlt;
+        }
+        return String.format(Locale.US, "target[wgs=%.6f,%.6f alt=%.0f]", lat, lng, alt);
     }
 
     /**
@@ -493,6 +522,32 @@ public class ServiceGo extends Service {
             screen = "?";
         }
         return "env[wifi=" + wifi + " screen=" + screen + "]";
+    }
+
+    /**
+     * 启动时枚举系统上所有 Provider 及其位置来源。
+     * 若存在我们未 mock 的 Provider, 它可能就是应用绕过 mock 读取真实位置的通路。
+     */
+    @SuppressLint("MissingPermission")
+    private void logAvailableProviders() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (String provider : mLocManager.getAllProviders()) {
+                String state;
+                try {
+                    Location loc = mLocManager.getLastKnownLocation(provider);
+                    state = loc == null ? "noloc"
+                            : String.format(Locale.US, "mock=%b lat=%.6f lng=%.6f",
+                                    isMockLocation(loc), loc.getLatitude(), loc.getLongitude());
+                } catch (Exception e) {
+                    state = "err";
+                }
+                sb.append(provider).append('{').append(state).append("} ");
+            }
+            XLog.i("SERVICEGO: providers=" + sb);
+        } catch (Exception e) {
+            XLog.e("SERVICEGO: logAvailableProviders failed: " + e.getMessage());
+        }
     }
 
     private void removeTestProviderGPS() {
