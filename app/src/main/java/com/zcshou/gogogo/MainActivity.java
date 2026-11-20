@@ -914,6 +914,12 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                     Snackbar.make(v, "模拟位置已启动", Snackbar.LENGTH_LONG)
                             .setAction("Action", null).show();
 
+                    // 前台服务 + WakeLock 都不能阻止部分 ROM 在熄屏后冻结进程,
+                    // 首次启动时引导加入电池优化白名单。
+                    if (!GoUtils.isIgnoringBatteryOptimizations(MainActivity.this)) {
+                        GoUtils.showBatteryOptimizationDialog(MainActivity.this);
+                    }
+
                     recordCurrentLocation(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
                     clearSelectionMarker();
                     mMarkLatLngMap = null;

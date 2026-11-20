@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.CountDownTimer;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Toast;
@@ -193,6 +194,49 @@ public class GoUtils {
                     }
                 })
                 .setNegativeButton("取消",(dialog, which) -> {
+                })
+                .show();
+    }
+
+    // 判断本应用是否已在电池优化白名单内 (Android 6+)
+    public static boolean isIgnoringBatteryOptimizations(Context context) {
+        try {
+            PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(context.getPackageName());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 引导用户把本应用加入电池优化白名单。
+     * 前台服务 + PARTIAL_WAKE_LOCK 仍无法阻止部分定制 ROM 在熄屏后冻结进程,
+     * 白名单是这类 ROM 上唯一有效的额外手段。
+     */
+    public static void showBatteryOptimizationDialog(Context context) {
+        new AlertDialog.Builder(context)
+                .setTitle("保持定位稳定")
+                .setMessage("部分系统会在熄屏后冻结后台进程，导致模拟位置中断。"
+                        + "请允许影梭在后台不受电池优化限制。")
+                .setPositiveButton("去设置", (dialog, which) -> {
+                    try {
+                        Intent intent = new Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + context.getPackageName()));
+                        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        context.startActivity(intent);
+                    } catch (Exception e) {
+                        // 部分 ROM 不响应该 Action, 回退到电池优化列表页
+                        try {
+                            Intent fallback = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                            fallback.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            context.startActivity(fallback);
+                        } catch (Exception ignored) {
+                            DisplayToast(context, "无法打开电池优化设置，请手动在系统设置中添加");
+                        }
+                    }
+                })
+                .setNegativeButton("忽略", (dialog, which) -> {
                 })
                 .show();
     }

@@ -32,6 +32,31 @@ SERVICEGO: loop stalled <挂起毫秒数>ms; wakeLockHeld=<true|false>
 
 排查时按该行计数：修复后持锁应不再出现，若 `wakeLockHeld=false` 则说明锁未获取成功（PowerManager 不可用或权限被拒），需查同段日志中的 `acquireWakeLock failed`。部分定制 ROM 会在持锁情况下仍冻结进程，此时需要把应用加入电池优化白名单。
 
+### 心跳与回读字段
+
+心跳每 10 秒一行，除原有的写入时间外追加回读与环境信息：
+
+```
+SERVICEGO: heartbeat systemAgeMs=.. gmsAgeMs=.. readback[gps=.. net=.. fused=..] env[wifi=.. screen=..]
+```
+
+`readback` 对每个 Provider 调用 `getLastKnownLocation` 并与当前 mock 目标比对，字段含义：
+
+| 字段 | 含义 |
+|------|------|
+| `null` | 该系统内根本没有该 Provider 的位置 |
+| `age=..ms` | 系统记录的位置时间距今多久，远大于一个 tick 说明读到的是旧位置 |
+| `dev=..m` | 与当前 mock 目标的偏差米数，接近 0 才说明该 Provider 存的就是目标位置 |
+| `mock=true/false` | 系统是否仍标记为测试位置 |
+
+`setTestProviderLocation` 不抛异常只代表调用被接受，不能证明位置已进入系统；`readback` 才是直接证据。若 `dev` 持续很大或 `mock=false`，说明 mock 未真正生效。
+
+熄屏与亮屏会各输出一行 `screen off/on; loop=lastTickAgeMs=.. wakeLockHeld=..`，用于判断冻结是否跟随熄屏以及冻结发生的准确时刻。
+
+### 精度取值
+
+注入的 `Location.setAccuracy()` 使用真实量级（GPS 8 米、网络 35 米）。此前传入的 `Criteria.ACCURACY_FINE`/`ACCURACY_COARSE` 是精度*等级*常量（值为 1/2），当作米数使用会让上报精度物理上不可信，融合定位可能因此降低该来源的权重。
+
 ## 自动化验证
 
 MockPositionTest 覆盖目标尚未推送、系统/GMS 单通路成功、Provider 写入停滞、推送循环停滞、5 秒边界及未来时间戳。完整编译命令：bash ./gradlew :app:assembleDebug :app:testDebugUnitTest。

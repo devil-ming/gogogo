@@ -16,6 +16,7 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.location.provider.ProviderProperties;
+import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
@@ -38,6 +39,7 @@ import com.zcshou.gogogo.R;
 import com.zcshou.joystick.JoyStick;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -58,6 +60,11 @@ public class ServiceGo extends Service {
     private static final String SERVICE_GO_HANDLER_NAME = "ServiceGoLocation";
     // 相邻两次 tick 超过该阈值即判定循环被挂起 (正常 tick 为 33ms)。
     private static final long STALL_THRESHOLD_MS = 5000;
+    // 真实 GPS 精度通常 5~20m、网络定位 20~100m。此前直接传入 Criteria.ACCURACY_FINE
+    // (=1) / ACCURACY_COARSE (=2) 这两个"等级常量"当作米数使用, 上报的精度物理上不可信,
+    // 融合定位可能因此给该来源降权。改为真实量级, 并保持 GPS 优于 NETWORK。
+    private static final float ACCURACY_GPS_M = 8.0f;
+    private static final float ACCURACY_NETWORK_M = 35.0f;
     private LocationManager mLocManager;
     private HandlerThread mLocHandlerThread;
     private Handler mLocHandler;
@@ -312,6 +319,9 @@ public class ServiceGo extends Service {
         IntentFilter filter = new IntentFilter();
         filter.addAction(SERVICE_GO_NOTE_ACTION_JOYSTICK_SHOW);
         filter.addAction(SERVICE_GO_NOTE_ACTION_JOYSTICK_HIDE);
+        // 熄屏/亮屏是判断"冻结是否跟随熄屏"的直接证据, 心跳只能看到恢复后的状态。
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(mActReceiver, filter);
 
         NotificationChannel mChannel = new NotificationChannel(SERVICE_GO_NOTE_CHANNEL_ID, SERVICE_GO_NOTE_CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT);
@@ -412,12 +422,77 @@ public class ServiceGo extends Service {
                     XLog.i("SERVICEGO: heartbeat systemAgeMs="
                             + (mLastSystemSuccessMs == 0 ? -1 : now - mLastSystemSuccessMs)
                             + " gmsAgeMs="
-                            + (mLastGmsSuccessMs == 0 ? -1 : now - mLastGmsSuccessMs));
+                            + (mLastGmsSuccessMs == 0 ? -1 : now - mLastGmsSuccessMs)
+                            + " " + describeReadback()
+                            + " " + describeEnvironment());
                 }
                 sendEmptyMessageDelayed(HANDLER_MSG_ID, TICK_INTERVAL_MS);
             }
         };
         // onStartCommand starts the loop only after coordinates have been validated.
+    }
+
+    /**
+     * 回读各 Provider 的 getLastKnownLocation, 与当前 mock 目标比对。
+     * setTestProviderLocation 不抛异常只说明调用被接受, 不代表系统真的存了这个位置;
+     * 这是目前日志唯一缺失的关键证据。
+     */
+    private String describeReadback() {
+        StringBuilder sb = new StringBuilder("readback[");
+        sb.append("gps=").append(describeProviderReadback(LocationManager.GPS_PROVIDER));
+        sb.append(" net=").append(describeProviderReadback(LocationManager.NETWORK_PROVIDER));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            sb.append(" fused=").append(describeProviderReadback(LocationManager.FUSED_PROVIDER));
+        }
+        return sb.append(']').toString();
+    }
+
+    @SuppressLint("MissingPermission")
+    private String describeProviderReadback(String provider) {
+        try {
+            Location loc = mLocManager.getLastKnownLocation(provider);
+            if (loc == null) return "null";
+            double dLng;
+            double dLat;
+            synchronized (mPositionLock) {
+                dLng = loc.getLongitude() - mCurLng;
+                dLat = loc.getLatitude() - mCurLat;
+            }
+            // 用米表示偏差, 便于判断是否仍是旧位置
+            double dMeters = Math.hypot(dLng * 111320 * Math.cos(Math.toRadians(loc.getLatitude())),
+                    dLat * 110574);
+            return String.format(Locale.US, "age=%dms dev=%.0fm mock=%b",
+                    System.currentTimeMillis() - loc.getTime(), dMeters, isMockLocation(loc));
+        } catch (Exception e) {
+            return "err:" + e.getClass().getSimpleName();
+        }
+    }
+
+    private static boolean isMockLocation(Location loc) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return loc.isMock();
+        }
+        //noinspection deprecation
+        return loc.isFromMockProvider();
+    }
+
+    /** 记录与定位稳定性直接相关的运行环境, 用于解释"为什么这次失效"。 */
+    private String describeEnvironment() {
+        String wifi;
+        String screen;
+        try {
+            WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            wifi = wifiManager != null && wifiManager.isWifiEnabled() ? "on" : "off";
+        } catch (Exception e) {
+            wifi = "?";
+        }
+        try {
+            PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+            screen = powerManager != null && powerManager.isInteractive() ? "on" : "off";
+        } catch (Exception e) {
+            screen = "?";
+        }
+        return "env[wifi=" + wifi + " screen=" + screen + "]";
     }
 
     private void removeTestProviderGPS() {
@@ -455,7 +530,7 @@ public class ServiceGo extends Service {
         try {
             // 尽可能模拟真实的 GPS 数据
             Location loc = new Location(LocationManager.GPS_PROVIDER);
-            loc.setAccuracy(Criteria.ACCURACY_FINE);    // 设定此位置的估计水平精度，以米为单位。
+            loc.setAccuracy(ACCURACY_GPS_M);    // 单位: 米。真实 GPS 量级, 而非等级常量 1
             loc.setAltitude(position.altitude);                     // 设置高度，在 WGS 84 参考坐标系中的米
             loc.setBearing(position.bearing);                       // 方向（度）
             loc.setLatitude(position.latitude);                   // 纬度（度）
@@ -511,7 +586,7 @@ public class ServiceGo extends Service {
         try {
             // 尽可能模拟真实的 NETWORK 数据
             Location loc = new Location(LocationManager.NETWORK_PROVIDER);
-            loc.setAccuracy(Criteria.ACCURACY_COARSE);  // 设定此位置的估计水平精度，以米为单位。
+            loc.setAccuracy(ACCURACY_NETWORK_M);  // 单位: 米。网络定位精度天然低于 GPS
             loc.setAltitude(position.altitude);                     // 设置高度，在 WGS 84 参考坐标系中的米
             loc.setBearing(position.bearing);                       // 方向（度）
             loc.setLatitude(position.latitude);                   // 纬度（度）
@@ -555,7 +630,7 @@ public class ServiceGo extends Service {
     private void setLocationFused(MockPosition position) {
         try {
             Location loc = new Location(LocationManager.FUSED_PROVIDER);
-            loc.setAccuracy(Criteria.ACCURACY_FINE);
+            loc.setAccuracy(ACCURACY_GPS_M);
             loc.setAltitude(position.altitude);
             loc.setBearing(position.bearing);
             loc.setLatitude(position.latitude);
@@ -577,7 +652,7 @@ public class ServiceGo extends Service {
                 || !mFusedWritePending.compareAndSet(false, true)) return;
         try {
             Location loc = new Location("fused");
-            loc.setAccuracy(Criteria.ACCURACY_FINE);
+            loc.setAccuracy(ACCURACY_GPS_M);
             loc.setAltitude(position.altitude);
             loc.setBearing(position.bearing);
             loc.setLatitude(position.latitude);
@@ -607,8 +682,23 @@ public class ServiceGo extends Service {
                 if (action.equals(SERVICE_GO_NOTE_ACTION_JOYSTICK_HIDE)) {
                     mJoyStick.hide();
                 }
+
+                if (action.equals(Intent.ACTION_SCREEN_OFF)) {
+                    XLog.i("SERVICEGO: screen off; loop=" + describeLoopState());
+                }
+
+                if (action.equals(Intent.ACTION_SCREEN_ON)) {
+                    XLog.i("SERVICEGO: screen on; loop=" + describeLoopState());
+                }
             }
         }
+    }
+
+    /** 熄屏/亮屏时输出循环状态, 用于判断冻结与熄屏的对应关系。 */
+    private String describeLoopState() {
+        long age = mLastTickMs == 0 ? -1 : SystemClock.elapsedRealtime() - mLastTickMs;
+        return "lastTickAgeMs=" + age
+                + " wakeLockHeld=" + (mWakeLock != null && mWakeLock.isHeld());
     }
 
     public class ServiceGoBinder extends Binder {
