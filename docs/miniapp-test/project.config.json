@@ -41,7 +41,7 @@
   },
   "compileType": "miniprogram",
   "libVersion": "3.0.0",
-  "appid": "wxtest001",
+  "appid": "touristappid",
   "projectname": "影梭定位测试",
   "simulatorType": "wechat",
   "simulatorPluginLibVersion": {},

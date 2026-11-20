@@ -40,15 +40,31 @@ Page({
           altitude: res.altitude != null ? res.altitude.toFixed(2) + ' 米' : '未知'
         };
 
-        // 检测是否是模拟位置（iOS支持，Android部分支持）
-        const isMock = res.latitude === 0 && res.longitude === 0 ? false :
-                       (Math.abs(res.accuracy) > 5000);
+        // 注意: wx.getLocation 不返回 mock 标记, 这里只做量级提示。
+        // accuracy 接近 8 或 35 说明读到的很可能是影梭注入的位置 (这两个是
+        // ServiceGo 里的 ACCURACY_GPS_M / ACCURACY_NETWORK_M);
+        // 出现其他量级 (几十到几百米) 说明定位来自影梭之外的来源。
+        let accuracyHint = '未知来源';
+        const acc = res.accuracy;
+        if (acc != null) {
+          if (Math.abs(acc - 8) < 1.5) {
+            accuracyHint = '疑似影梭 GPS (accuracy≈8)';
+          } else if (Math.abs(acc - 35) < 1.5) {
+            accuracyHint = '疑似影梭 NETWORK (accuracy≈35)';
+          } else if (acc < 30) {
+            accuracyHint = '其他 GPS 来源 (accuracy=' + acc + ')';
+          } else if (acc < 500) {
+            accuracyHint = '基站/WiFi 定位 (accuracy=' + acc + ')';
+          } else {
+            accuracyHint = 'IP 或粗定位 (accuracy=' + acc + ')';
+          }
+        }
 
         that.setData({
           wgs84: wgs84Data,
           mockInfo: {
-            isMock: isMock,
-            message: isMock ? '可能是模拟位置' : '正常定位'
+            isMock: acc != null && (Math.abs(acc - 8) < 1.5 || Math.abs(acc - 35) < 1.5),
+            message: accuracyHint
           }
         });
 
