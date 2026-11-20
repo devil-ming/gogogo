@@ -85,8 +85,10 @@ public class ServiceGo extends Service {
     private final Object mPositionLock = new Object();
     private static volatile MockPosition sCurrentPosition;
     private final AtomicBoolean mFusedWritePending = new AtomicBoolean();
-    // GMS 写入在途超时。超过该时长仍无回调, 视为卡死并允许新的写入接管。
-    private static final long FUSED_WRITE_TIMEOUT_MS = 2000;
+    // GMS 写入在途超时。正常延迟实测 31~64ms, 超过该时长仍无回调视为卡死。
+    // 取值权衡: 太短会让卡死期间请求堆积(每个超时周期发起一次), 太长会让读取方
+    // 长时间拿不到新位置而退回真实来源。1s 约正常延迟的 20 倍, 卡死时每秒仅 1 次请求。
+    private static final long FUSED_WRITE_TIMEOUT_MS = 1000;
     private volatile long mFusedWriteStartMs;
     private final Map<String, Long> mLastErrorLog = new HashMap<>();
     private volatile long mLastGmsSuccessMs;

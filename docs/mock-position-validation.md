@@ -61,7 +61,7 @@ SERVICEGO: heartbeat systemAgeMs=.. gmsAgeMs=.. readback[gps=.. net=.. fused=..]
 
 中断期间，依赖 GMS fused 的读取方会退回 WiFi/基站并拿到真实位置，表现为"同一功能有时是模拟位置、有时是真实位置"。
 
-现在超过 `FUSED_WRITE_TIMEOUT_MS`（2 秒）仍无回调时，新写入会强制接管并输出：
+现在超过 `FUSED_WRITE_TIMEOUT_MS`（1 秒）仍无回调时，新写入会强制接管并输出：
 
 ```
 SERVICEGO: gms/write timeout, taking over after <毫秒>ms
