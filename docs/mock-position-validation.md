@@ -53,9 +53,19 @@ SERVICEGO: heartbeat systemAgeMs=.. gmsAgeMs=.. readback[gps=.. net=.. fused=..]
 
 熄屏与亮屏会各输出一行 `screen off/on; loop=lastTickAgeMs=.. wakeLockHeld=..`，用于判断冻结是否跟随熄屏以及冻结发生的准确时刻。
 
-### 精度取值
+### 精度取值与运动学一致性
 
 注入的 `Location.setAccuracy()` 使用真实量级（GPS 8 米、网络 35 米）。此前传入的 `Criteria.ACCURACY_FINE`/`ACCURACY_COARSE` 是精度*等级*常量（值为 1/2），当作米数使用会让上报精度物理上不可信，融合定位可能因此降低该来源的权重。
+
+瞬移不再直接跳到目标坐标。`snapshot()` 从上一个已渲染位置出发，按 `TELEPORT_MAX_SPEED_MPS`（80 m/s）匀速过渡到目标，并把**实际位移除以时间**作为该帧的速度上报，保证位移与速度在运动学上自洽。此前实现里位置会瞬间跳变而速度恒定报告摇杆设定值（1.2 m/s），融合定位的运动学校验会判定这种数据不可能并丢弃，表现为"系统里位置正确但应用仍读到真实位置"。
+
+心跳中的 `render` 字段用于观察过渡状态：
+
+```
+target[wgs=lat,lng alt=..] render[lat=..,lng=.. rem=..m v=..m/s]
+```
+
+`rem` 是距目标的剩余距离，`v` 是本帧上报速度。正常情况下 `v` 不应为 0 而 `rem` 很大；到达后 `rem≈0` 且 `v=0`。
 
 ## 自动化验证
 

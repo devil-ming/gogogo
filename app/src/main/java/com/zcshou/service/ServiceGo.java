@@ -54,7 +54,7 @@ public class ServiceGo extends Service {
     private double mCurLng = DEFAULT_LNG;
     private double mCurAlt = DEFAULT_ALT;
     private float mCurBea = DEFAULT_BEA;
-    private double mSpeed = 1.2;        /* 默认的速度，单位 m/s */
+    private double mSpeed = 1.2;        /* 摇杆的意图速度, 单位 m/s。注入时改用实测速度, 见 snapshot() */
     private static final int HANDLER_MSG_ID = 0;
     // 33ms (~30Hz) tick: 缩短"mock 过期"窗口,避免某些应用在两次 push 之间读到真实位置后漂移
     private static final long TICK_INTERVAL_MS = 33;
@@ -95,13 +95,108 @@ public class ServiceGo extends Service {
     // 依赖定位的应用会退回 WiFi/基站并拿到真实位置。运行期间持有 PARTIAL_WAKE_LOCK。
     private volatile PowerManager.WakeLock mWakeLock;
 
+    // ---- 位置插值与真实速度 ----
+    // 直接瞬移会让"位移"和"报告速度"互相矛盾: 33ms 内移动几百米, 却报告 1.2m/s,
+    // 融合定位的运动学校验会判定该位置不可能而丢弃。这里改为从上一个已知位置
+    // 出发平滑过渡到目标, 并按实际位移计算速度, 使两者始终自洽。
+    // 瞬移过渡速度上限。取值需兼顾两点: 足够快以免用户感到"传送延迟",
+    // 又要落在融合定位认为交通可达的范围内, 否则仍会被运动学校验丢弃。
+    private static final double TELEPORT_MAX_SPEED_MPS = 80.0;   // 约 288km/h
+    private static final double ARRIVE_EPS_M = 0.5;
+    private double mRenderLng;
+    private double mRenderLat;
+    private boolean mRenderValid = false;
+    private long mLastStepMs;
+    private double mTeleportRateMps = 0;
+
     public static MockPosition getCurrentPosition() {
         return sCurrentPosition;
     }
 
+    /** 只读快照, 不推进插值。用于 UI 状态展示与目标设置。 */
+    private MockPosition currentSnapshot() {
+        synchronized (mPositionLock) {
+            return new MockPosition(mRenderValid ? mRenderLng : mCurLng,
+                    mRenderValid ? mRenderLat : mCurLat,
+                    mCurAlt, (float) mCurBea, 0f, 0,
+                    mLastSystemSuccessMs, mLastGmsSuccessMs);
+        }
+    }
+
+    /**
+     * 推进一帧插值并返回本帧应注入的位置。
+     *
+     * 速度不再是摇杆的"意图速度", 而是由上一帧与本帧的实际位移算出的真实速度,
+     * 保证位移与速度在运动学上自洽。瞬移时按 TELEPORT_MAX_SPEED_MPS 匀速过渡,
+     * 避免出现"33ms 移动几公里却报告 1.2m/s"这种不可能的数据。
+     */
     private MockPosition snapshot(long tick) {
-        return new MockPosition(mCurLng, mCurLat, mCurAlt, mCurBea, (float) mSpeed,
-                tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+        long nowMs = tick > 0 ? tick : SystemClock.elapsedRealtime();
+        double targetLng;
+        double targetLat;
+        double targetAlt;
+        double targetBea;
+        synchronized (mPositionLock) {
+            targetLng = mCurLng;
+            targetLat = mCurLat;
+            targetAlt = mCurAlt;
+            targetBea = mCurBea;
+        }
+
+        if (!mRenderValid) {
+            // 首帧直接落在目标上, 不做过渡
+            synchronized (mPositionLock) {
+                mRenderLng = targetLng;
+                mRenderLat = targetLat;
+                mRenderValid = true;
+                mLastStepMs = nowMs;
+                mTeleportRateMps = 0;
+            }
+            return new MockPosition(targetLng, targetLat, targetAlt, (float) targetBea, 0f,
+                    tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+        }
+
+        synchronized (mPositionLock) {
+            double dt = (nowMs - mLastStepMs) / 1000.0;
+            mLastStepMs = nowMs;
+            if (dt <= 0) dt = TICK_INTERVAL_MS / 1000.0;
+
+            double distance = distanceMeters(mRenderLat, mRenderLng, targetLat, targetLng);
+
+            if (distance <= ARRIVE_EPS_M) {
+                // 已到达目标: 位置固定, 速度为 0
+                mRenderLng = targetLng;
+                mRenderLat = targetLat;
+                mTeleportRateMps = 0;
+                return new MockPosition(mRenderLng, mRenderLat, targetAlt, (float) targetBea, 0f,
+                        tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+            }
+
+            // 按最大可达速度推进, 使位移/时长恒等于报告速度
+            double stepMeters = TELEPORT_MAX_SPEED_MPS * dt;
+            double movedMeters;
+            if (stepMeters >= distance) {
+                mRenderLng = targetLng;
+                mRenderLat = targetLat;
+                movedMeters = distance;
+            } else {
+                double ratio = stepMeters / distance;
+                mRenderLng += (targetLng - mRenderLng) * ratio;
+                mRenderLat += (targetLat - mRenderLat) * ratio;
+                movedMeters = stepMeters;
+            }
+
+            mTeleportRateMps = movedMeters / dt;
+            return new MockPosition(mRenderLng, mRenderLat, targetAlt, (float) targetBea,
+                    (float) mTeleportRateMps, tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+        }
+    }
+
+    /** 球面近似距离, 单位米。 */
+    private static double distanceMeters(double lat1, double lng1, double lat2, double lng2) {
+        double dLat = (lat2 - lat1) * 110574.0;
+        double dLng = (lng2 - lng1) * 111320.0 * Math.cos(Math.toRadians((lat1 + lat2) / 2.0));
+        return Math.hypot(dLat, dLng);
     }
 
     private void logProviderFailure(String provider, Exception error) {
@@ -242,7 +337,7 @@ public class ServiceGo extends Service {
             mCurLat = lat;
             mCurAlt = alt;
             mHasPosition = true;
-            sCurrentPosition = snapshot(0);
+            sCurrentPosition = currentSnapshot();
         }
         mJoyStick.setCurrentPosition(lng, lat, alt);
         // 循环即将启动,同步持锁,避免第一帧就落在休眠窗口里。
@@ -429,7 +524,8 @@ public class ServiceGo extends Service {
                 synchronized (mPositionLock) {
                     if (isStop) return;
                     // Preserve a target change made while the previous write was in flight.
-                    sCurrentPosition = snapshot(SystemClock.elapsedRealtime());
+                    // 只读快照: 插值已在上面推进过一帧, 这里不能再推进。
+                    sCurrentPosition = currentSnapshot();
                 }
                 long now = SystemClock.elapsedRealtime();
                 // tick 间隔远超预期说明循环被挂起过 (CPU 休眠 / 进程冻结)。
@@ -463,12 +559,21 @@ public class ServiceGo extends Service {
         double lng;
         double lat;
         double alt;
+        double renderLat;
+        double renderLng;
+        double rate;
         synchronized (mPositionLock) {
             lng = mCurLng;
             lat = mCurLat;
             alt = mCurAlt;
+            renderLat = mRenderLat;
+            renderLng = mRenderLng;
+            rate = mTeleportRateMps;
         }
-        return String.format(Locale.US, "target[wgs=%.6f,%.6f alt=%.0f]", lat, lng, alt);
+        double remain = distanceMeters(renderLat, renderLng, lat, lng);
+        return String.format(Locale.US,
+                "target[wgs=%.6f,%.6f alt=%.0f] render[lat=%.6f,lng=%.6f rem=%.0fm v=%.1fm/s]",
+                lat, lng, alt, renderLat, renderLng, remain, rate);
     }
 
     /**
@@ -818,7 +923,7 @@ public class ServiceGo extends Service {
                 mCurLng = lng;
                 mCurLat = lat;
                 mCurAlt = alt;
-                sCurrentPosition = snapshot(0);
+                sCurrentPosition = currentSnapshot();
             }
             mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
         }
