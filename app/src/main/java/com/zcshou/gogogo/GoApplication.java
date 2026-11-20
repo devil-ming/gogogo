@@ -2,6 +2,8 @@ package com.zcshou.gogogo;
 
 import android.app.Application;
 
+import androidx.preference.PreferenceManager;
+
 import com.elvishew.xlog.LogConfiguration;
 import com.elvishew.xlog.LogLevel;
 import com.elvishew.xlog.XLog;
@@ -43,8 +45,11 @@ public class GoApplication extends Application {
     private void initXlog() {
         File logPath = getExternalFilesDir("Logs");
         if (logPath != null) {
+            // setting_log_off 之前只挂在设置界面上, 从未被读取; 这里让它真正生效。
+            boolean logOff = PreferenceManager.getDefaultSharedPreferences(this)
+                    .getBoolean("setting_log_off", false);
             LogConfiguration config = new LogConfiguration.Builder()
-                    .logLevel(LogLevel.ALL)
+                    .logLevel(logOff ? LogLevel.NONE : LogLevel.ALL)
                     .tag(APP_NAME)                                         // 指定 TAG，默认为 "X-LOG"
                     .enableThreadInfo()                                    // 允许打印线程信息，默认禁止
                     .enableStackTrace(2)                                   // 允许打印深度为 2 的调用栈信息，默认禁止

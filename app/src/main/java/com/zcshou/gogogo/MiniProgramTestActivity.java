@@ -13,6 +13,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.preference.PreferenceManager;
 
 import com.elvishew.xlog.XLog;
 import com.zcshou.utils.MapUtils;
@@ -38,7 +39,6 @@ public class MiniProgramTestActivity extends BaseActivity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     // Key 由 local.properties 在 build 时注入(gitignored),拷贝项目后请在 local.properties 配置自己申请的 Key
     private static final String DEFAULT_BAIDU_AK = BuildConfig.MAPS_API_KEY;
-
     private TextView tvStatus;
     private TextView tvWgs84;
     private TextView tvGcj02;
@@ -187,7 +187,12 @@ public class MiniProgramTestActivity extends BaseActivity {
     }
 
     private void queryBaiduAddress(double bdLat, double bdLng) {
-        String url = "https://api.map.baidu.com/reverse_geocoding/v3/?ak=" + DEFAULT_BAIDU_AK
+        // setting_map_key 之前只挂在设置界面上, 从未被读取; 留空时回退到构建时注入的 Key。
+        String configured = PreferenceManager.getDefaultSharedPreferences(this)
+                .getString("setting_map_key", "");
+        final String ak = (configured == null || configured.trim().isEmpty())
+                ? DEFAULT_BAIDU_AK : configured.trim();
+        String url = "https://api.map.baidu.com/reverse_geocoding/v3/?ak=" + ak
                 + "&output=json&coordtype=bd09ll&location=" + bdLat + "," + bdLng;
 
         Request request = new Request.Builder().url(url).get().build();

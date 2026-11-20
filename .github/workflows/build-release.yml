@@ -30,11 +30,12 @@ jobs:
         run: echo "tag=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
 
       # 创建 local.properties 文件
+      # TENCENT_MAP_KEY 是 Manifest 里 ${TENCENT_MAP_KEY} 占位符的来源, 缺失会导致构建失败
       - name: Create local.properties
         run: |
           cat << EOF > local.properties
+          TENCENT_MAP_KEY=${{ secrets.TENCENT_MAP_KEY }}
           MAPS_API_KEY=${{ secrets.MAPS_API_KEY }}
-          MAPS_SAFE_CODE=${{ secrets.MAPS_SAFE_CODE }}
           EOF
 
       - name: Build APK

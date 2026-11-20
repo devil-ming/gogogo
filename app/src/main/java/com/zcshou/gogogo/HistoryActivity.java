@@ -144,7 +144,7 @@ public class HistoryActivity extends BaseActivity {
                 String Location = cursor.getString(1);
                 String Longitude = cursor.getString(2);
                 String Latitude = cursor.getString(3);
-                long TimeStamp = cursor.getInt(4);
+                long TimeStamp = cursor.getLong(4);
                 String CustomLongitude = cursor.getString(5);
                 String CustomLatitude = cursor.getString(6);
                 Log.d("TB", ID + "\t" + Location + "\t" + Longitude + "\t" + Latitude + "\t" + TimeStamp + "\t" + CustomLongitude + "\t" + CustomLatitude);
@@ -175,7 +175,7 @@ public class HistoryActivity extends BaseActivity {
     private void recordArchive() {
         double limits;
         try {
-            limits = Double.parseDouble(sharedPreferences.getString("setting_pos_history", getResources().getString(R.string.history_expiration)));
+            limits = Double.parseDouble(sharedPreferences.getString("setting_history_expiration", getResources().getString(R.string.history_expiration)));
         } catch (NumberFormatException e) {  // GOOD: The exception is caught.
             limits = 7;
         }
@@ -232,7 +232,7 @@ public class HistoryActivity extends BaseActivity {
                 } else {
                     List<Map<String, Object>> searchRet = new ArrayList<>();
                     for (int i = 0; i < mAllRecord.size(); i++){
-                        if (mAllRecord.get(i).toString().indexOf(newText) > 0){
+                        if (mAllRecord.get(i).toString().contains(newText)){
                             searchRet.add(mAllRecord.get(i));
                         }
                     }

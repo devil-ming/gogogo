@@ -649,6 +649,12 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             EditText dialog_lng = view.findViewById(R.id.joystick_longitude);
             EditText dialog_lat = view.findViewById(R.id.joystick_latitude);
             RadioButton rbBD = view.findViewById(R.id.pos_type_bd);
+            RadioButton rbGcj = view.findViewById(R.id.pos_type_gcj02);
+            // setting_coordinate_system 之前只存在于设置界面, 从未影响实际行为。
+            // 以偏好作为输入对话框的默认选中项, 用户仍可在对话框内手动切换。
+            boolean preferGcj = "gcj02".equals(sharedPreferences.getString("setting_coordinate_system", "bd09"));
+            rbBD.setChecked(!preferGcj);
+            rbGcj.setChecked(preferGcj);
 
             Button btnGo = view.findViewById(R.id.input_position_ok);
             btnGo.setOnClickListener(v2 -> {

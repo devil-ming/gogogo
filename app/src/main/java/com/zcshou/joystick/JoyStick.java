@@ -210,6 +210,13 @@ public class JoyStick extends View {
     }
 
     public void destroy() {
+        // TimeCount.onFinish() 会自行 start() 形成自循环, 不停掉会持续向 ServiceGo 回调
+        // 坐标并持有 Service 引用, 导致服务退出后位置仍在漂移。
+        if (mTimer != null) {
+            mTimer.cancel();
+            isMove = false;
+        }
+
         if (mMapLayout.getParent() != null) {
             mWindowManager.removeViewImmediate(mMapLayout);
         }
@@ -701,7 +708,7 @@ public class JoyStick extends View {
                 } else {
                     List<Map<String, Object>> searchRet = new ArrayList<>();
                     for (int i = 0; i < mAllRecord.size(); i++){
-                        if (mAllRecord.get(i).toString().indexOf(newText) > 0){
+                        if (mAllRecord.get(i).toString().contains(newText)){
                             searchRet.add(mAllRecord.get(i));
                         }
                     }
@@ -789,7 +796,7 @@ public class JoyStick extends View {
                 String Location = cursor.getString(1);
                 String Longitude = cursor.getString(2);
                 String Latitude = cursor.getString(3);
-                long TimeStamp = cursor.getInt(4);
+                long TimeStamp = cursor.getLong(4);
                 String CustomLongitude = cursor.getString(5);
                 String CustomLatitude = cursor.getString(6);
                 Log.d("TB", ID + "\t" + Location + "\t" + Longitude + "\t" + Latitude + "\t" + TimeStamp + "\t" + CustomLongitude + "\t" + CustomLatitude);

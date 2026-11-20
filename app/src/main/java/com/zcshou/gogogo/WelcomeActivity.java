@@ -80,7 +80,9 @@ public class WelcomeActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         if (requestCode == SDK_PERMISSION_REQUEST) {
-            for (int i = 0; i < ReqPermissions.size(); i++) {
+            // 以 grantResults 长度为准: ReqPermissions 是 static 且可能被再次追加,
+            // 用它做上界会在两次请求后越界。
+            for (int i = 0; i < grantResults.length; i++) {
                 if (grantResults[i] != PackageManager.PERMISSION_GRANTED) {
                     GoUtils.DisplayToast(this, getResources().getString(R.string.app_error_permission));
                     return;
@@ -92,6 +94,10 @@ public class WelcomeActivity extends AppCompatActivity {
     }
 
     private void checkDefaultPermissions() {
+        // 每次请求前清空: 该列表是 static, 若首次请求被拒后再次调用, 重复追加会让
+        // ReqPermissions.size() 大于 grantResults.length, onRequestPermissionsResult 越界。
+        ReqPermissions.clear();
+
         // 定位精确位置
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ReqPermissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
