@@ -20,6 +20,18 @@
 
 真机验证时，记录微信失效的时间，并对照系统/GMS 成功写入时间及影梭测试页位置更新时间。SDK 写入成功仅说明对应 API 接受请求，不保证其他应用采用该位置。
 
+### 后台停摆与 WakeLock
+
+前台服务阻止进程被回收，但不会阻止 CPU 休眠。屏幕熄灭后，HandlerThread 的 33ms tick 会被挂起，相邻两次 tick 的间隔远超预期，此时系统内的 mock 位置变成过期数据，读取定位的应用会回退到 WiFi/基站并拿到真实位置。
+
+模拟运行期间 ServiceGo 持有 `PARTIAL_WAKE_LOCK`（不点亮屏幕），释放时机为 `onDestroy`。相邻两次 tick 超过 5 秒会在日志中输出：
+
+```
+SERVICEGO: loop stalled <挂起毫秒数>ms; wakeLockHeld=<true|false>
+```
+
+排查时按该行计数：修复后持锁应不再出现，若 `wakeLockHeld=false` 则说明锁未获取成功（PowerManager 不可用或权限被拒），需查同段日志中的 `acquireWakeLock failed`。部分定制 ROM 会在持锁情况下仍冻结进程，此时需要把应用加入电池优化白名单。
+
 ## 自动化验证
 
 MockPositionTest 覆盖目标尚未推送、系统/GMS 单通路成功、Provider 写入停滞、推送循环停滞、5 秒边界及未来时间戳。完整编译命令：bash ./gradlew :app:assembleDebug :app:testDebugUnitTest。

@@ -23,6 +23,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Message;
+import android.os.PowerManager;
 import android.os.Process;
 import android.os.SystemClock;
 
@@ -55,6 +56,8 @@ public class ServiceGo extends Service {
     // 33ms (~30Hz) tick: 缩短"mock 过期"窗口,避免某些应用在两次 push 之间读到真实位置后漂移
     private static final long TICK_INTERVAL_MS = 33;
     private static final String SERVICE_GO_HANDLER_NAME = "ServiceGoLocation";
+    // 相邻两次 tick 超过该阈值即判定循环被挂起 (正常 tick 为 33ms)。
+    private static final long STALL_THRESHOLD_MS = 5000;
     private LocationManager mLocManager;
     private HandlerThread mLocHandlerThread;
     private Handler mLocHandler;
@@ -71,6 +74,11 @@ public class ServiceGo extends Service {
     private volatile long mLastGmsSuccessMs;
     private volatile long mLastSystemSuccessMs;
     private long mLastHeartbeatMs;
+    private long mLastTickMs;
+    // 前台服务只能防进程被杀,不能阻止 CPU 休眠。屏幕熄灭后 HandlerThread 的 33ms tick
+    // 会被冻结 (日志中单次最长停摆 349s),导致系统里的 mock 位置变成"过期数据",
+    // 依赖定位的应用会退回 WiFi/基站并拿到真实位置。运行期间持有 PARTIAL_WAKE_LOCK。
+    private volatile PowerManager.WakeLock mWakeLock;
 
     public static MockPosition getCurrentPosition() {
         return sCurrentPosition;
@@ -208,6 +216,8 @@ public class ServiceGo extends Service {
             sCurrentPosition = snapshot(0);
         }
         mJoyStick.setCurrentPosition(lng, lat, alt);
+        // 循环即将启动,同步持锁,避免第一帧就落在休眠窗口里。
+        acquireWakeLock();
         // Do not publish the built-in default coordinates before receiving the Intent.
         if (!mLoopStarted) {
             mLoopStarted = true;
@@ -227,6 +237,8 @@ public class ServiceGo extends Service {
         XLog.i("SERVICEGO: onDestroy; mock location stopped");
         mLocHandler.removeMessages(HANDLER_MSG_ID);
         mLocHandlerThread.quit();
+
+        releaseWakeLock();
 
         mJoyStick.destroy();
 
@@ -254,6 +266,45 @@ public class ServiceGo extends Service {
         stopForeground(STOP_FOREGROUND_REMOVE);
 
         super.onDestroy();
+    }
+
+    /**
+     * 只在模拟运行期间持有 PARTIAL_WAKE_LOCK:保持 CPU 运行,不点亮屏幕。
+     * 前台服务通知 + startForeground 已保证进程优先级,这里补的是 CPU 不被挂起。
+     */
+    private void acquireWakeLock() {
+        if (mWakeLock != null && mWakeLock.isHeld()) return;
+        try {
+            PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+            if (powerManager == null) {
+                XLog.e("SERVICEGO: PowerManager unavailable; wake lock not acquired");
+                return;
+            }
+            mWakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK, "GoGoGo::MockLocationLoop");
+            mWakeLock.setReferenceCounted(false);
+            // 不加超时:进程被杀时系统会自动释放 wakelock,不存在泄漏风险。
+            // 加超时反而会让长时间模拟在超时后静默失去锁。
+            mWakeLock.acquire();
+            XLog.i("SERVICEGO: PARTIAL_WAKE_LOCK acquired");
+        } catch (Exception e) {
+            mWakeLock = null;
+            XLog.e("SERVICEGO: acquireWakeLock failed: " + e.getMessage());
+        }
+    }
+
+    private void releaseWakeLock() {
+        if (mWakeLock == null) return;
+        try {
+            if (mWakeLock.isHeld()) {
+                mWakeLock.release();
+                XLog.i("SERVICEGO: PARTIAL_WAKE_LOCK released");
+            }
+        } catch (Exception e) {
+            XLog.e("SERVICEGO: releaseWakeLock failed: " + e.getMessage());
+        } finally {
+            mWakeLock = null;
+        }
     }
 
     private void initNotification() {
@@ -349,6 +400,13 @@ public class ServiceGo extends Service {
                     sCurrentPosition = snapshot(SystemClock.elapsedRealtime());
                 }
                 long now = SystemClock.elapsedRealtime();
+                // tick 间隔远超预期说明循环被挂起过 (CPU 休眠 / 进程冻结)。
+                // 这是判断后台是否停摆的直接指标,比外部推断可靠。
+                if (mLastTickMs > 0 && now - mLastTickMs > STALL_THRESHOLD_MS) {
+                    XLog.w("SERVICEGO: loop stalled " + (now - mLastTickMs)
+                            + "ms; wakeLockHeld=" + (mWakeLock != null && mWakeLock.isHeld()));
+                }
+                mLastTickMs = now;
                 if (now - mLastHeartbeatMs >= 10000) {
                     mLastHeartbeatMs = now;
                     XLog.i("SERVICEGO: heartbeat systemAgeMs="
