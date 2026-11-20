@@ -108,6 +108,10 @@ public class ServiceGo extends Service {
     // 又要落在融合定位认为交通可达的范围内, 否则仍会被运动学校验丢弃。
     private static final double TELEPORT_MAX_SPEED_MPS = 80.0;   // 约 288km/h
     private static final double ARRIVE_EPS_M = 0.5;
+    // 超过该距离的传送直接落点, 不做插值。插值只用于消除短距离跳变,
+    // 长距离若按 80m/s 过渡会持续数十秒到数分钟, 期间上报高速移动本身
+    // 就是异常数据, 且用户必须长时间等待才能到达目标。
+    private static final double INTERPOLATE_MAX_DISTANCE_M = 300.0;
     private double mRenderLng;
     private double mRenderLat;
     private boolean mRenderValid = false;
@@ -167,6 +171,20 @@ public class ServiceGo extends Service {
             if (dt <= 0) dt = TICK_INTERVAL_MS / 1000.0;
 
             double distance = distanceMeters(mRenderLat, mRenderLng, targetLat, targetLng);
+
+            // 长距离直接落点。插值只用于短距离平滑, 否则 17km 传送要飞 212 秒,
+            // 期间上报 80m/s 的高速移动本身就是异常数据, 且用户必须长时间等待。
+            // 用户对"传送"的预期是立即到达, 优先级高于运动学完美。
+            if (distance > INTERPOLATE_MAX_DISTANCE_M) {
+                mRenderLng = targetLng;
+                mRenderLat = targetLat;
+                mTeleportRateMps = 0;
+                // 记录直接落点, 便于区分"瞬移"与"平滑移动"两种模式
+                XLog.i(String.format(Locale.US,
+                        "SERVICEGO: teleport jump %.0fm (interpolation skipped)", distance));
+                return new MockPosition(mRenderLng, mRenderLat, targetAlt, (float) targetBea, 0f,
+                        tick, mLastSystemSuccessMs, mLastGmsSuccessMs);
+            }
 
             if (distance <= ARRIVE_EPS_M) {
                 // 已到达目标: 位置固定, 速度为 0
